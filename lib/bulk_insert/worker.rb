@@ -6,14 +6,17 @@ module BulkInsert
     attr_accessor :after_save_callback
     attr_accessor :adapter_name
     attr_reader :ignore
+    attr_reader :replace
 
-    def initialize(connection, table_name, column_names, set_size=500, ignore=false)
+    def initialize(connection, table_name, column_names, set_size=500, ignore=false, replace=false)
       @connection = connection
       @set_size = set_size
 
       @adapter_name = connection.adapter_name
       # INSERT IGNORE only fails inserts with duplicate keys or unallowed nulls not the whole set of inserts
       @ignore = ignore
+      # REPLACE does an update if the insert would fail owing to duplicates
+      @replace = replace
 
       columns = connection.columns(table_name)
       column_map = columns.inject({}) { |h, c| h.update(c.name => c) }
@@ -111,23 +114,63 @@ module BulkInsert
         false
       end
     end
+    
+    # The keywords for the three types of operation we do in each adapter
+    KEYWORDS = {
+      'MySQL' => {
+        ignore: {
+          pre: 'INSERT IGNORE'
+        },
+        replace: {
+          pre: 'REPLACE'
+        }
+      },
+      /sqlite/i => {
+        ignore: {
+          pre: 'INSERT OR IGNORE'
+        },
+        replace: {
+          pre: 'INSERT OR REPLACE'
+        }
+      },
+      'PostgreSQL' => {
+        ignore: {
+          post: ' ON CONFLICT DO NOTHING'
+        },
+        replace: {
+          post: ' ON CONFLICT DO UPDATE'
+        }
+      }
+    }
 
     def insert_sql_statement
-      insert_ignore = if ignore
-        if adapter_name == "MySQL"
-          'IGNORE'
-        elsif adapter_name.match(/sqlite.*/i)
-          'OR IGNORE'
-        else
-          '' # Not supported
+      "#{insert_keyword} INTO #{@table_name} (#{@column_names}) VALUES "
+    end
+    
+    def insert_keyword
+      return 'INSERT' unless ignore or replace
+      KEYWORDS.keys.each do |pattern|
+        if pattern === adapter_name
+          if ignore
+            return KEYWORDS[pattern][:ignore][:pre]  || 'INSERT'
+          elsif replace
+            return KEYWORDS[pattern][:replace][:pre] || 'INSERT'
+          end
         end
       end
-
-      "INSERT #{insert_ignore} INTO #{@table_name} (#{@column_names}) VALUES "
     end
 
     def on_conflict_statement
-      (adapter_name == 'PostgreSQL' && ignore ) ? ' ON CONFLICT DO NOTHING' : ''
+      return '' unless ignore or replace
+      KEYWORDS.keys.each do |pattern|
+        if pattern === adapter_name
+          if ignore
+            return KEYWORDS[pattern][:ignore][:post] || ''
+          elsif replace
+            return KEYWORDS[pattern][:replace][:post] || ''
+          end
+        end
+      end
     end
   end
 end
